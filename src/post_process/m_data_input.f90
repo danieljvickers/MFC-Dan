@@ -40,8 +40,7 @@ module m_data_input
     type(scalar_field), allocatable, dimension(:), public    :: q_prim_vf  !< Primitive variables
     type(integer_field), allocatable, dimension(:,:), public :: bc_type    !< Boundary condition identifiers
     type(scalar_field), public                               :: q_T_sf     !< Temperature field
-    ! type(scalar_field), public :: ib_markers !<
-    type(integer_field), public :: ib_markers
+    type(integer_field), public                              :: ib_markers
 
     procedure(s_read_abstract_data_files), pointer :: s_read_data_files => null()
 
@@ -105,22 +104,27 @@ contains
     !> Helper subroutine to read IB data files
     impure subroutine s_read_ib_data_files(file_loc_base, t_step)
 
-        character(len=*), intent(in)                :: file_loc_base
-        integer, intent(in), optional               :: t_step
-        character(LEN=len_trim(file_loc_base) + 20) :: file_loc
-        logical                                     :: file_exist
-        integer                                     :: ifile, ierr, data_size
+        character(len=*), intent(in)         :: file_loc_base
+        integer, intent(in), optional        :: t_step
+        character(LEN=path_len + 2*name_len) :: file_loc
+        logical                              :: file_exist
+        integer                              :: ifile, ierr, data_size
 
 #ifdef MFC_MPI
         integer, dimension(MPI_STATUS_SIZE) :: status
         integer(KIND=MPI_OFFSET_KIND)       :: disp
         integer(KIND=MPI_OFFSET_KIND)       :: m_MOK, n_MOK, p_MOK, MOK, WP_MOK, var_MOK
         integer                             :: save_index
+        character(len=10)                   :: t_step_string
 #endif
 
         if (.not. ib) return
 
-        if (parallel_io) then
+        if (parallel_io .and. file_per_process) then
+            call s_int_to_str(t_step, t_step_string)
+            write (file_loc, '(A,I0,A,i7.7,A)') 'ib_markers_', t_step, '_', proc_rank, '.dat'
+            file_loc = trim(case_dir) // '/restart_data/lustre_' // trim(t_step_string) // '/' // trim(file_loc)
+        else if (parallel_io) then
             write (file_loc, '(A)') trim(file_loc_base) // 'ib.dat'
         else
             write (file_loc, '(A)') trim(file_loc_base) // '/ib_data.dat'
@@ -128,7 +132,17 @@ contains
         inquire (FILE=trim(file_loc), EXIST=file_exist)
 
         if (file_exist) then
-            if (parallel_io) then
+            if (parallel_io .and. file_per_process) then
+#ifdef MFC_MPI
+                call MPI_FILE_OPEN(MPI_COMM_SELF, file_loc, MPI_MODE_RDONLY, mpi_info_int, ifile, ierr)
+
+                data_size = (m + 1)*(n + 1)*(p + 1)
+
+                call MPI_FILE_READ(ifile, MPI_IO_IB_DATA%var%sf, data_size, MPI_INTEGER, status, ierr)
+
+                call MPI_FILE_CLOSE(ifile, ierr)
+#endif
+            else if (parallel_io) then
 #ifdef MFC_MPI
                 call MPI_FILE_OPEN(MPI_COMM_WORLD, file_loc, MPI_MODE_RDONLY, mpi_info_int, ifile, ierr)
 
