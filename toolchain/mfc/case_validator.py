@@ -1305,7 +1305,6 @@ class CaseValidator:
         igr_iter_solver = self.get("igr_iter_solver")
         alf_factor = self.get("alf_factor")
         model_eqns = self.get("model_eqns")
-        ib = self.get("ib", "F") == "T"
         bubbles_euler = self.get("bubbles_euler", "F") == "T"
         bubbles_lagrange = self.get("bubbles_lagrange", "F") == "T"
         alt_soundspeed = self.get("alt_soundspeed", "F") == "T"
@@ -1323,7 +1322,6 @@ class CaseValidator:
         self.prohibit(igr_iter_solver is not None and igr_iter_solver not in [1, 2], "igr_iter_solver must be 1 or 2")
         self.prohibit(alf_factor is not None and alf_factor < 0, "alf_factor must be non-negative")
         self.prohibit(model_eqns is not None and model_eqns != 2, "IGR only supports model_eqns = 2")
-        self.prohibit(ib, "IGR does not support the immersed boundary method")
         self.prohibit(bubbles_euler, "IGR does not support Euler-Euler bubble models")
         self.prohibit(bubbles_lagrange, "IGR does not support Euler-Lagrange bubble models")
         self.prohibit(alt_soundspeed, "IGR does not support alt_soundspeed = T")
