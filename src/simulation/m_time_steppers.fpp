@@ -221,7 +221,9 @@ contains
         ! Allocating the cell-average primitive variables
         @:ALLOCATE(q_prim_vf(1:sys_size))
 
-        if (.not. igr) then
+        ! IGR normally has no need of q_prim_vf (it works directly off q_cons_vf), so its per-field %sf arrays are left
+        ! unallocated - except under ib, where the IB ghost-point routines read real primitives from q_prim_vf.
+        if ((.not. igr) .or. ib) then
             do i = 1, eqn_idx%adv%end
                 @:ALLOCATE(q_prim_vf(i)%sf(idwbuff(1)%beg:idwbuff(1)%end, idwbuff(2)%beg:idwbuff(2)%end, &
                            & idwbuff(3)%beg:idwbuff(3)%end))
@@ -544,6 +546,11 @@ contains
             if (adv_n) call s_comp_alpha_from_n(q_cons_ts(1)%vf)
 
             if (ib) then
+                ! IGR skips the usual conservative-to-primitive conversion (it works directly off q_cons_vf), but the IB
+                ! ghost-point routines below read real primitives (velocity, pressure) from q_prim_vf at neighboring fluid
+                ! cells - without this, those reads are stale/uninitialized under igr.
+                if (igr) call s_convert_conservative_to_primitive_variables(q_cons_ts(1)%vf, q_T_sf, q_prim_vf, idwbuff)
+
                 ! check if any IBMS are moving, and if so, update the markers, ghost points, levelsets, and levelset norms
                 if (moving_immersed_boundary_flag) then
                     call s_propagate_immersed_boundaries(s)
@@ -965,7 +972,7 @@ contains
             @:DEALLOCATE(q_prim_ts1, q_prim_ts2)
         end if
 
-        if (.not. igr) then
+        if ((.not. igr) .or. ib) then
             ! Deallocating the cell-average primitive variables
             do i = 1, eqn_idx%adv%end
                 @:DEALLOCATE(q_prim_vf(i)%sf)

@@ -18,7 +18,7 @@ module m_igr
     implicit none
 
     private; public :: s_initialize_igr_module, s_igr_iterative_solve, s_igr_riemann_solver, s_igr_sigma_x, s_igr_flux_add, &
-        & s_finalize_igr_module
+        & s_finalize_igr_module, jac
 
     !> @cond
 #ifdef __NVCOMPILER_GPU_UNIFIED_MEM

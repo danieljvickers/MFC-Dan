@@ -22,11 +22,12 @@ module m_ibm
     use m_patch_geometries
     use m_collisions
     use m_thermochem, only: num_species, gas_constant, get_mixture_molecular_weight, get_mixture_energy_mass
+    use m_igr, only: jac
 
     implicit none
 
-    private :: s_compute_image_points, s_compute_interpolation_coeffs, s_interpolate_image_point, s_find_ghost_points, &
-        & s_find_num_ghost_points
+    private :: s_compute_image_points, s_compute_interpolation_coeffs, s_interpolate_image_point, &
+        & s_interpolate_entropic_pressure, s_find_ghost_points, s_find_num_ghost_points
     ; public :: s_initialize_ibm_module, s_ibm_setup, s_ibm_correct_state, s_finalize_ibm_module
 
     type(integer_field), public :: ib_markers
@@ -154,6 +155,7 @@ contains
         real(wp) :: pres_IP
         real(wp), dimension(3) :: vel_IP, vel_norm_IP
         real(wp) :: c_IP
+        real(wp) :: entropic_pressure_IP
 
         #:if not MFC_CASE_OPTIMIZATION and USING_AMD
             real(wp), dimension(3)  :: Gs
@@ -222,7 +224,7 @@ contains
             $:GPU_PARALLEL_LOOP(private='[i, physical_loc, dyn_pres, alpha_rho_IP, alpha_IP, pres_IP, vel_IP, vel_g, vel_norm_IP, &
                                 & r_IP, v_IP, pb_IP, mv_IP, nmom_IP, presb_IP, massv_IP, rho, gamma, pi_inf, Re_K, G_K, Gs, gp, &
                                 & innerp, norm, buf, radial_vector, rotation_velocity, j, k, l, q, qv_K, c_IP, nbub, patch_id, &
-                                & Ys_IP, T_IP, mw_IP, e_IP, v_blow_eff]')
+                                & Ys_IP, T_IP, mw_IP, e_IP, v_blow_eff, entropic_pressure_IP]')
             do i = 1, num_gps
                 gp = ghost_points(i)
                 j = gp%loc(1)
@@ -253,6 +255,8 @@ contains
                     call s_interpolate_image_point(q_prim_vf, gp, alpha_rho_IP, alpha_IP, pres_IP, vel_IP, c_IP)
                 end if
 
+                if (igr) call s_interpolate_entropic_pressure(gp, entropic_pressure_IP)
+
                 ! Injecting (burning) surface: replace the mirrored ghost composition with pure
                 ! injected fuel at the local pressure and the ambient (image-point) temperature.
                 ! Setting a consistent injected density here (rather than reusing the heavy ambient
@@ -272,6 +276,11 @@ contains
                 $:GPU_LOOP(parallelism='[seq]')
                 do q = 1, num_fluids
                     q_prim_vf(q)%sf(j, k, l) = alpha_rho_IP(q)
+                end do
+                ! IGR only stores num_fluids-1 volume fractions (the last is inferred as 1 - sum of the others), so there is
+                ! no adv slot to write for q == num_fluids in that case
+                $:GPU_LOOP(parallelism='[seq]')
+                do q = 1, eqn_idx%adv%end - eqn_idx%adv%beg + 1
                     q_prim_vf(eqn_idx%adv%beg + q - 1)%sf(j, k, l) = alpha_IP(q)
                 end do
 
@@ -291,6 +300,11 @@ contains
                                   & l) + pres_IP/(1._wp - 2._wp*abs(gp%levelset*alpha_rho_IP(q)/pres_IP) &
                                   & *dot_product(patch_ib(patch_id)%force/patch_ib(patch_id)%mass, gp%levelset_norm))
                     end do
+                end if
+
+                ! Neumann condition for the IGR entropic pressure (Sigma): zero-gradient across the IB surface
+                if (igr) then
+                    jac(j, k, l) = entropic_pressure_IP
                 end if
 
                 ! If in simulation, use acc mixture subroutines
@@ -371,6 +385,10 @@ contains
                 $:GPU_LOOP(parallelism='[seq]')
                 do q = 1, num_fluids
                     q_cons_vf(q)%sf(j, k, l) = alpha_rho_IP(q)
+                end do
+                ! See the matching q_prim_vf loop above: IGR stores only num_fluids-1 volume fractions
+                $:GPU_LOOP(parallelism='[seq]')
+                do q = 1, eqn_idx%adv%end - eqn_idx%adv%beg + 1
                     q_cons_vf(eqn_idx%adv%beg + q - 1)%sf(j, k, l) = alpha_IP(q)
                 end do
 
@@ -873,6 +891,12 @@ contains
                     $:GPU_LOOP(parallelism='[seq]')
                     do l = eqn_idx%cont%beg, eqn_idx%cont%end
                         alpha_rho_IP(l) = alpha_rho_IP(l) + coeff*q_prim_vf(l)%sf(i, j, k)
+                    end do
+
+                    ! IGR only stores num_fluids-1 volume fractions; the last is inferred below, once interpolation is done,
+                    ! as 1 - sum of the others
+                    $:GPU_LOOP(parallelism='[seq]')
+                    do l = 1, eqn_idx%adv%end - eqn_idx%adv%beg + 1
                         alpha_IP(l) = alpha_IP(l) + coeff*q_prim_vf(eqn_idx%adv%beg + l - 1)%sf(i, j, k)
                     end do
 
@@ -921,7 +945,47 @@ contains
             end do
         end do
 
+        if (igr) then
+            ! sum() of the empty slice alpha_IP(1:0) is 0, so this also covers num_fluids == 1 correctly
+            alpha_IP(num_fluids) = 1._wp - sum(alpha_IP(1:num_fluids - 1))
+        end if
+
     end subroutine s_interpolate_image_point
+
+    !> Interpolate the IGR entropic pressure (Sigma, m_igr's jac) to a ghost point's image point
+    subroutine s_interpolate_entropic_pressure(gp, entropic_pressure_IP)
+        $:GPU_ROUTINE(parallelism='[seq]')
+
+        type(ghost_point), intent(in) :: gp
+        real(wp), intent(inout)       :: entropic_pressure_IP
+        integer                       :: i, j, k  !< Iterator variables
+        integer                       :: i1, i2, j1, j2, k1, k2  !< Iterator variables
+        real(wp)                      :: coeff
+
+        i1 = gp%ip_grid(1); i2 = i1 + 1
+        j1 = gp%ip_grid(2); j2 = j1 + 1
+        k1 = gp%ip_grid(3); k2 = k1 + 1
+
+        if (p == 0) then
+            k1 = 0
+            k2 = 0
+        end if
+
+        entropic_pressure_IP = 0._wp
+
+        $:GPU_LOOP(parallelism='[seq]')
+        do i = i1, i2
+            $:GPU_LOOP(parallelism='[seq]')
+            do j = j1, j2
+                $:GPU_LOOP(parallelism='[seq]')
+                do k = k1, k2
+                    coeff = gp%interp_coeffs(i - i1 + 1, j - j1 + 1, k - k1 + 1)
+                    entropic_pressure_IP = entropic_pressure_IP + coeff*jac(i, j, k)
+                end do
+            end do
+        end do
+
+    end subroutine s_interpolate_entropic_pressure
 
     !> Resets the current indexes of immersed boundaries and replaces them after updating
     !> the position of each moving immersed boundary
@@ -980,7 +1044,7 @@ contains
         ! viscous stress tensor with temp vectors to hold divergence calculations
         real(wp), dimension(1:3,1:3) :: viscous_stress
         real(wp), dimension(1:3)     :: local_force_contribution, radial_vector, local_torque_contribution
-        real(wp)                     :: cell_volume, dynamic_viscosity
+        real(wp)                     :: cell_volume, dynamic_viscosity, alpha_sum
 
         #:if not MFC_CASE_OPTIMIZATION and USING_AMD
             real(wp), dimension(3) :: dynamic_viscosities
@@ -1005,7 +1069,7 @@ contains
 
         $:GPU_PARALLEL_LOOP(private='[i, j, k, l, xp, yp, zp, ib_idx, ib_idx_temp, encoded_ib_idx, fluid_idx, radial_vector, &
                             & local_force_contribution, cell_volume, local_torque_contribution, dynamic_viscosity, &
-                            & viscous_stress]', copy='[forces, torques]', copyin='[dynamic_viscosities]', collapse=3)
+                            & alpha_sum, viscous_stress]', copy='[forces, torques]', copyin='[dynamic_viscosities]', collapse=3)
         do i = 0, m
             do j = 0, n
                 do k = 0, p
@@ -1041,11 +1105,17 @@ contains
                             if (viscous) then
                                 ! compute the volume-weighted local dynamic viscosity
                                 dynamic_viscosity = 0._wp
-                                do fluid_idx = 1, num_fluids
+                                alpha_sum = 0._wp
+                                do fluid_idx = 1, eqn_idx%adv%end - eqn_idx%adv%beg + 1
                                     ! local dynamic viscosity is the dynamic viscosity of the fluid times alpha of the fluid
                                     dynamic_viscosity = dynamic_viscosity + (q_prim_vf(fluid_idx + eqn_idx%adv%beg - 1)%sf(i, j, &
                                         & k)*dynamic_viscosities(fluid_idx))
+                                    alpha_sum = alpha_sum + q_prim_vf(fluid_idx + eqn_idx%adv%beg - 1)%sf(i, j, k)
                                 end do
+                                if (igr) then
+                                    ! IGR infers the last volume fraction as 1 - sum of the others (see s_interpolate_image_point)
+                                    dynamic_viscosity = dynamic_viscosity + (1._wp - alpha_sum)*dynamic_viscosities(num_fluids)
+                                end if
 
                                 do l = -fd_number, fd_number
                                     call s_compute_viscous_stress_tensor(viscous_stress, q_prim_vf, dynamic_viscosity, i + l, j, k)
