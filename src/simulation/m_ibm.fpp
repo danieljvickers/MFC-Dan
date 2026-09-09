@@ -197,7 +197,7 @@ contains
         type(ghost_point)      :: innerp
 
         ! set the Moving IBM interior conservative variables
-        $:GPU_PARALLEL_LOOP(private='[i, j, k, patch_id, rho]', collapse=3)
+        $:GPU_PARALLEL_LOOP(private='[i, j, k, patch_id, rho, patch_id_temp]', collapse=3)
         do l = 0, p
             do k = 0, n
                 do j = 0, m
@@ -206,13 +206,8 @@ contains
                         call s_decode_patch_periodicity(patch_id, patch_id_temp)
                         call s_get_neighborhood_idx(patch_id_temp, patch_id)
                         if (patch_id > 0) then
-                            ! Placeholder low pressure inside the IB solid. Skip it with
-                            ! chemistry on: it would force an unphysical temperature
-                            ! (P=1 Pa at the ambient density -> T~0.01 K), which the
-                            ! Cantera temperature/transport evaluation (run grid-wide
-                            ! before the IB mask is applied) cannot handle -> NaN/hang.
-                            ! The interior is masked from the RHS regardless.
-                            if (.not. chemistry) q_prim_vf(eqn_idx%E)%sf(j, k, l) = 1._wp
+                            ! Placeholder low pressure inside the IB solid
+                            ! if (.not. chemistry) q_prim_vf(eqn_idx%E)%sf(j, k, l) = 1._wp
                             rho = 0._wp
                             do i = 1, num_fluids
                                 rho = rho + q_prim_vf(eqn_idx%cont%beg + i - 1)%sf(j, k, l)
@@ -236,7 +231,7 @@ contains
             $:GPU_PARALLEL_LOOP(private='[i, physical_loc, dyn_pres, alpha_rho_IP, alpha_IP, pres_IP, vel_IP, vel_g, vel_norm_IP, &
                                 & r_IP, v_IP, pb_IP, mv_IP, nmom_IP, presb_IP, massv_IP, rho, gamma, pi_inf, Re_K, G_K, Gs, gp, &
                                 & innerp, norm, buf, radial_vector, rotation_velocity, j, k, l, q, qv_K, c_IP, nbub, patch_id, &
-                                & Ys_IP, T_IP, mw_IP, e_IP, v_blow_eff, vel_sum_g, E_ghost]')
+                                & Ys_IP, T_IP, mw_IP, e_IP, v_blow_eff, vel_sum_g, E_ghost, r]')
             do i = 1, num_gps
                 gp = ghost_points(i)
                 if (.not. gp%interp_valid) cycle
@@ -298,14 +293,9 @@ contains
                 if (patch_ib(patch_id)%moving_ibm <= 1) then
                     q_prim_vf(eqn_idx%E)%sf(j, k, l) = pres_IP
                 else
-                    q_prim_vf(eqn_idx%E)%sf(j, k, l) = 0._wp
-                    $:GPU_LOOP(parallelism='[seq]')
-                    do q = 1, num_fluids
-                        ! Pressure correction for moving IB: accounts for acceleration of IB surface
-                        q_prim_vf(eqn_idx%E)%sf(j, k, l) = q_prim_vf(eqn_idx%E)%sf(j, k, &
-                                  & l) + pres_IP/(1._wp - 2._wp*abs(gp%levelset*alpha_rho_IP(q)/pres_IP) &
-                                  & *dot_product(patch_ib(patch_id)%force/patch_ib(patch_id)%mass, gp%levelset_norm))
-                    end do
+                    ! Pressure correction for moving IB: accounts for acceleration of IB surface
+                    q_prim_vf(eqn_idx%E)%sf(j, k, l) = pres_IP/(1._wp - 2._wp*abs(gp%levelset*rho/pres_IP) &
+                              & *dot_product(patch_ib(patch_id)%force/patch_ib(patch_id)%mass, gp%levelset_norm))
                 end if
 
                 ! If in simulation, use acc mixture subroutines
@@ -380,6 +370,7 @@ contains
                 $:GPU_LOOP(parallelism='[seq]')
                 do q = eqn_idx%mom%beg, eqn_idx%mom%end
                     q_cons_vf(q)%sf(j, k, l) = rho*vel_g(q - eqn_idx%mom%beg + 1)
+                    q_prim_vf(q)%sf(j, k, l) = vel_g(q - eqn_idx%mom%beg + 1)
                     vel_sum_g = vel_sum_g + vel_g(q - eqn_idx%mom%beg + 1)**2._wp
                 end do
                 dyn_pres = 5.e-1_wp*rho*vel_sum_g
@@ -412,7 +403,8 @@ contains
                     end do
                     q_cons_vf(eqn_idx%E)%sf(j, k, l) = rho*e_IP + dyn_pres
                 else
-                    call s_compute_energy(pres_IP, alpha_rho_IP, alpha_IP, vel_sum_g, E_ghost)
+                    ! call s_compute_energy(pres_IP, alpha_rho_IP, alpha_IP, vel_sum_g, E_ghost)
+                    call s_compute_energy(q_prim_vf(eqn_idx%E)%sf(j, k, l), alpha_rho_IP, alpha_IP, vel_sum_g, E_ghost)
                     q_cons_vf(eqn_idx%E)%sf(j, k, l) = E_ghost
                 end if
                 ! Set bubble vars
