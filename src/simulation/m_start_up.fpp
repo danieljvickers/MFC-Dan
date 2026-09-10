@@ -587,9 +587,14 @@ contains
                 dt_floor = min(dt_floor, 1.e-3_wp*collision_time/real(collision_temporal_resolution, wp))
             end if
 
-            if (dt < dt_floor .and. cfl_adap_dt .and. proc_rank == 0) then
-                print *, "Delta t = ", dt, " limited by ", dt_limiter
-                call s_mpi_abort("Delta t has become too small")
+            ! dt is a global min, so every rank takes this branch together
+            if (dt < dt_floor .and. cfl_adap_dt) then
+                call s_report_dt_floor_cells(dt_floor)
+                call s_mpi_barrier()
+                if (proc_rank == 0) then
+                    print *, "Delta t = ", dt, " limited by ", dt_limiter
+                    call s_mpi_abort("Delta t has become too small")
+                end if
             end if
         end if
 
