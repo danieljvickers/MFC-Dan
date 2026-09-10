@@ -230,10 +230,8 @@ contains
             ! are always inside one, so the interpolation below never reads a cell this loop writes.
             $:GPU_PARALLEL_LOOP(private='[i, physical_loc, dyn_pres, alpha_rho_IP, alpha_IP, pres_IP, vel_IP, vel_g, vel_norm_IP, &
                                 & pres_GP, alpha_rho_GP, r_IP, v_IP, pb_IP, mv_IP, nmom_IP, presb_IP, massv_IP, rho, gamma, &
-                                & pi_inf, Re_K, &
-                                & G_K, Gs, gp, innerp, norm, buf, radial_vector, rotation_velocity, j, k, l, q, qv_K, c_IP, &
-                                & nbub, patch_id, &
-                                & Ys_IP, T_IP, mw_IP, e_IP, v_blow_eff, vel_sum_g, E_ghost, r]')
+                                & pi_inf, Re_K, G_K, Gs, gp, innerp, norm, buf, radial_vector, rotation_velocity, j, k, l, q, &
+                                & qv_K, c_IP, nbub, patch_id, Ys_IP, T_IP, mw_IP, e_IP, v_blow_eff, vel_sum_g, E_ghost, r]')
             do i = 1, num_gps
                 gp = ghost_points(i)
                 if (.not. gp%interp_valid) cycle
@@ -293,10 +291,12 @@ contains
                     pres_GP = pres_IP
                     alpha_rho_GP = alpha_rho_IP
                 else
-                    ! Pressure correction for moving IB: accounts for acceleration of IB surface
-                    pres_GP = pres_IP &
-                              & /max(1._wp - 2._wp*abs(gp%levelset)*rho/pres_IP &
-                              & *dot_product(patch_ib(patch_id)%force/patch_ib(patch_id)%mass, gp%levelset_norm), 5.e-1_wp)
+                    ! Pressure correction for moving IB: accounts for acceleration of IB surface.
+                    ! Clamped both ways - the linearization it comes from holds only while the
+                    ! correction is order one, and an unbounded one drives the ghost state to vacuum.
+                    pres_GP = pres_IP/min(max(1._wp - 2._wp*abs(gp%levelset) &
+                                          & *rho/pres_IP*dot_product(patch_ib(patch_id)%force/patch_ib(patch_id)%mass, &
+                                          & gp%levelset_norm), 5.e-1_wp), 2._wp)
 
                     ! The adiabatic wall condition T_GP = T_IP the correction is derived from also
                     ! fixes the ghost density: p + B = (n - 1)*cv*rho*T at both points under the one
