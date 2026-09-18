@@ -22,7 +22,7 @@ wave_front = -1.5
 total_time = 1.5
 num_time_steps = 2000
 dt = float(total_time / num_time_steps)
-num_saves = 100
+num_saves = 1000
 steps_to_save = int(num_time_steps / num_saves)
 
 # Configuring case dictionary
@@ -41,8 +41,8 @@ print(
             "y_domain%beg": -domain_size * 0.5,
             "y_domain%end": domain_size * 0.5,
             "cyl_coord": "F",
-            "m": 256,
-            "n": 256,
+            "m": 1000,
+            "n": 1000,
             "p": 0,
             "dt": dt,
             "t_step_start": 0,
@@ -89,7 +89,7 @@ print(
             "precision": "double",
             "prim_vars_wrt": "T",
             "E_wrt": "T",
-            "ib_state_wrt": "F",
+            "ib_state_wrt": "T",
             "parallel_io": "T",
             # Patch: Constant Tube filled with air
             # Specify the cylindrical air tube grid geometry
